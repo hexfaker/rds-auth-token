@@ -36,12 +36,18 @@ With Go installed:
 go install github.com/hexfaker/rds-auth-token@latest
 ```
 
-This produces a binary named `rds-auth-token` in `$(go env GOPATH)/bin`.
+This produces a binary named `rds-auth-token` in `$(go env GOPATH)/bin`. Set
+`GOBIN` to install elsewhere, e.g. `GOBIN=~/.local/bin go install ...`.
 
 Or **download a prebuilt static binary** from the
 [Releases](https://github.com/hexfaker/rds-auth-token/releases) page
 (linux/darwin, amd64/arm64), extract the `tar.gz`, and drop the binary
 wherever you need it.
+
+> **Running inside a sandbox/container?** Use a **static** binary. The release
+> artifacts are static (`CGO_ENABLED=0`); a bare `go install` is *dynamically*
+> linked by default and won't run against a different runtime's glibc. Build a
+> static one with `CGO_ENABLED=0 go install github.com/hexfaker/rds-auth-token@latest`.
 
 ## Usage
 
@@ -96,46 +102,59 @@ an IAM token. You *could* reach for `flatpak-spawn --host`, but that is a full
 sandbox escape — it lets the app run arbitrary commands on your host, which is
 exactly what the sandbox is supposed to prevent.
 
-**Solution — least privilege.** Give the sandbox just two things: a static
-binary it can execute *inside* the sandbox, and read-only access to your AWS
-config. No host exec, no broad filesystem access.
+**Solution — least privilege.** Give the sandbox a few narrow, read-only-ish
+things: the static binary mounted read-only, read-only access to your AWS
+config, and read-write access to *only* the SSO token cache. No host exec.
 
-1. Drop this static binary into pgAdmin's own data directory, which the sandbox
-   can already see and execute without any extra permission:
-
-   ```sh
-   mkdir -p ~/.var/app/org.pgadmin.pgadmin4/data/bin
-   cp rds-auth-token ~/.var/app/org.pgadmin.pgadmin4/data/bin/
-   chmod +x ~/.var/app/org.pgadmin.pgadmin4/data/bin/rds-auth-token
-   ```
-
-   Inside the sandbox this path appears as `$XDG_DATA_HOME/bin/rds-auth-token`.
-
-2. Grant the sandbox **read-only** access to your AWS config — nothing else:
+1. Install the **static** binary on the host (a dynamic build won't run inside
+   the Flatpak runtime — see the install note above):
 
    ```sh
-   flatpak override --user --filesystem=~/.aws:ro org.pgadmin.pgadmin4
+   CGO_ENABLED=0 GOBIN=~/.local/bin go install github.com/hexfaker/rds-auth-token@latest
    ```
+
+2. Grant the sandbox three minimal things in one override:
+
+   ```sh
+   flatpak override --user \
+     --filesystem=~/.local/bin/rds-auth-token:ro \
+     --filesystem=~/.aws:ro \
+     --filesystem=~/.aws/sso/cache \
+     org.pgadmin.pgadmin4
+   ```
+
+   - **the binary, read-only** — mounted, not copied, so a `go install` update
+     flows through (restart pgAdmin to pick it up);
+   - **`~/.aws`, read-only** — credentials/config are read but never altered;
+   - **`~/.aws/sso/cache`, read-write** — required so the SDK can refresh an
+     expired SSO token, which it writes back here. The nested override keeps the
+     rest of `~/.aws` read-only. *If you only use static credentials (no SSO),
+     drop this line and keep `~/.aws` fully read-only.*
+
+   (Mounting the binary at its host path makes it appear at the same absolute
+   path inside the sandbox.)
 
 3. In the pgAdmin server's connection settings, set **"exec command to set the
    password"** (the `passexec_cmd` field) to:
 
    ```
-   /home/<you>/.var/app/org.pgadmin.pgadmin4/data/bin/rds-auth-token --profile <profile> --hostname <rds-endpoint> --port %PORT% --username %USERNAME%
+   /home/<you>/.local/bin/rds-auth-token --profile <profile> --hostname <rds-endpoint> --port %PORT% --username %USERNAME%
    ```
 
    pgAdmin substitutes `%PORT%` and `%USERNAME%` from the connection's own
    fields, so the command stays in sync with the rest of the server definition.
 
 **SSO note.** `aws sso login` still happens on the **host**, where the AWS CLI
-lives. The binary only *consumes* the cached SSO token from `~/.aws`. It does
-make the SSO `GetRoleCredentials` network call, so the sandbox needs network
-access — pgAdmin's sandbox already has it.
+lives. The binary *consumes* the cached SSO token from `~/.aws` and refreshes it
+when it expires (hence the cache being writable). Token generation makes no RDS
+API call, but resolving SSO credentials makes the `GetRoleCredentials` network
+call — pgAdmin's sandbox already has network access.
 
 **Why this is least-privilege:** the sandbox gains no ability to execute host
-processes (no `flatpak-spawn --host`), and the only filesystem grant is
-*read-only* access to `~/.aws`. The token itself never touches the host beyond
-reading config.
+processes (no `flatpak-spawn --host`); the binary and your AWS config are
+*read-only*; and the only writable grant is the SSO token cache, which it
+already reads. A compromised pgAdmin can, at worst, read your AWS config and
+churn your SSO token cache — not spawn a shell or touch the rest of your home.
 
 ## Prior art
 
