@@ -156,13 +156,6 @@ processes (no `flatpak-spawn --host`); the binary and your AWS config are
 already reads. A compromised pgAdmin can, at worst, read your AWS config and
 churn your SSO token cache — not spawn a shell or touch the rest of your home.
 
-## Prior art
-
-[`keymon/rds-generate-db-auth-token-go`](https://github.com/keymon/rds-generate-db-auth-token-go)
-is a similar Go tool that also wraps `BuildAuthToken`. `rds-auth-token` adds an
-explicit `--profile` flag (and SSO-aware, hostname-derived region resolution),
-making it a flag-compatible, profile/SSO-aware drop-in for the AWS CLI command.
-
 ## How it works
 
 The token is a SigV4 *presigned* request, computed locally:
