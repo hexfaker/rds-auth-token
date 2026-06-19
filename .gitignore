@@ -1,0 +1,8 @@
+# Build output
+/dist/
+/rds-auth-token
+/rds-auth-token.exe
+
+# Test/coverage artifacts
+*.out
+*.test
